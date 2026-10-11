@@ -2,10 +2,12 @@ using System.Text.Json;
 using Cluckwork.Api.IntegrationTests.Infrastructure;
 using Cluckwork.Api.Mcp;
 using Cluckwork.Application.Modules.Access.Contracts;
+using Cluckwork.Application.Modules.EggOperations.Contracts;
 using Cluckwork.Domain.Modules.EggOperations.Eggs;
 using Cluckwork.Domain.Modules.Farm.Accounts;
 using Cluckwork.Domain.Modules.Farm.Contracts;
 using Cluckwork.Domain.Modules.FlockManagement.Flocks;
+using Cluckwork.Infrastructure.Modules.EggOperations.Repositories;
 using static Cluckwork.Api.IntegrationTests.Mcp.McpConnection;
 
 namespace Cluckwork.Api.IntegrationTests.Mcp;
@@ -136,6 +138,45 @@ public sealed class McpReadToolsTests(CluckworkWebApplicationFactory factory)
         Assert.True(rest.Complete);
         Assert.Null(rest.NextOffset);
         Assert.NotEqual(first.Items[0].GetRawText(), rest.Items[0].GetRawText());
+    }
+
+    // Grade names are unique per farm, not per account, so two farms' "Large" at one sort
+    // order tie, and PostgreSQL returns tied rows in no promised order. The id breaks the tie.
+    [Fact]
+    public void StockOrder_BreaksANameAndSortOrderTieById()
+    {
+        Guid[] ids = [Guid.NewGuid(), Guid.NewGuid()];
+        Array.Sort(ids);
+        StockByGrade Large(Guid id) => new(id, "Large", 0, 0, 0, LowStockFloor: null);
+
+        var ordered = EggLotRepository.InStockOrder([Large(ids[1]), Large(ids[0])]);
+
+        Assert.Equal(ids, ordered.Select(r => r.EggGradeId));
+    }
+
+    // The same tie through the tool's paging: each page holds one of the two rows.
+    [Fact]
+    public async Task ReadStock_PagesTiedGradesOfTwoFarms_EachOnce()
+    {
+        using var host = Host(factory);
+        var user = await SeedAsync(factory, Roles.Manager);
+        foreach (var quantity in new[] { 20, 10 })
+        {
+            var id = Guid.NewGuid();
+            await factory.WithTenantScopeAsync(user.AccountId, async db =>
+            {
+                db.EggGrades.Add(EggGrade.Create(id, user.AccountId, Guid.NewGuid(), "Large", Domain.Modules.EggOperations.Contracts.EggGradeType.Size, 0, isSaleable: true));
+                await db.SaveChangesAsync();
+            });
+            await factory.SeedEggLotAsync(user.AccountId, id, quantity);
+        }
+
+        await using var client = await ConnectAsync(host, await IssueAsync(host, user, [OAuthScopes.ReadFarm]));
+        var first = await PageAsync<StockRow>(client, "cluckwork_read_stock", new() { ["limit"] = 1 });
+        var second = await PageAsync<StockRow>(client, "cluckwork_read_stock", new() { ["limit"] = 1, ["offset"] = first.NextOffset });
+
+        Assert.Equal([10, 20], first.Items.Concat(second.Items).Select(r => r.Available).Order());
+        Assert.True(second.Complete);
     }
 
     // The tool's own cap holds when a caller asks for more.

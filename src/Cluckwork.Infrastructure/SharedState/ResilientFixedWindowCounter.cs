@@ -43,6 +43,26 @@ internal sealed class ResilientFixedWindowCounter(
         }
     }
 
+    // Also reads what the fallback counted for the same key and window: Redis can answer a
+    // read while refusing increments, and the increments it refused landed here. The larger
+    // of the two, not the sum: an increment Redis applied before its reply timed out landed
+    // in both. That never double counts and undercounts by at most the smaller count.
+    public async ValueTask<FixedWindowResult> CountAsync(
+        string key, TimeSpan window, CancellationToken cancellationToken = default)
+    {
+        var local = await fallback.CountAsync(key, window, cancellationToken);
+        try
+        {
+            var shared = await redis.CountAsync(key, window, cancellationToken);
+            return shared with { Count = Math.Max(shared.Count, local.Count) };
+        }
+        catch (Exception ex) when (ex is RedisException or RedisTimeoutException)
+        {
+            Alarm();
+            return local;
+        }
+    }
+
     // RedisTimeoutException derives from TimeoutException, not RedisException
     // — without it a slow/saturated Redis would THROW instead of falling
     // back, the exact silent-degradation the alarm exists to surface.

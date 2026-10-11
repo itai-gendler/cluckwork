@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 using ModelContextProtocol.AspNetCore;
 using ModelContextProtocol.Server;
 using Cluckwork.Api.Mcp;
@@ -107,6 +108,65 @@ public sealed class McpEndpointTests(CluckworkWebApplicationFactory factory)
 
         Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
         Assert.Equal(["POST"], response.Content.Headers.Allow);
+    }
+
+    // The Origin check covers every request to /mcp and runs before authentication, so a
+    // foreign page gets 403 with no token and on GET. Without Origin, the 401 and 405 stand.
+    [Theory]
+    [InlineData("2026-07-28")]
+    [InlineData("2025-11-25")]
+    public async Task ForeignOrigin_Gets403_BeforeAuthentication_OnEveryMethod(string protocolVersion)
+    {
+        using var foreignPost = await SendAsync(HttpMethod.Post, protocolVersion, "https://untrusted.example");
+        using var foreignGet = await SendAsync(HttpMethod.Get, protocolVersion, "https://untrusted.example");
+        using var foreignDelete = await SendAsync(HttpMethod.Delete, protocolVersion, "https://untrusted.example");
+        using var foreignTrailingSlash = await SendAsync(HttpMethod.Post, protocolVersion, "https://untrusted.example", "/MCP/");
+        using var plainPost = await SendAsync(HttpMethod.Post, protocolVersion, origin: null);
+        using var plainGet = await SendAsync(HttpMethod.Get, protocolVersion, origin: null);
+        using var plainDelete = await SendAsync(HttpMethod.Delete, protocolVersion, origin: null);
+
+        Assert.Equal(HttpStatusCode.Forbidden, foreignPost.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, foreignGet.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, foreignDelete.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, foreignTrailingSlash.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, plainPost.StatusCode);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, plainGet.StatusCode);
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, plainDelete.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("https://localhost/", new string[0], true)]
+    [InlineData("https://localhost/", new[] { "https://localhost" }, true)]
+    [InlineData("https://localhost/", new[] { "HTTPS://LOCALHOST" }, true)]
+    [InlineData("https://localhost/", new[] { "https://localhost:443" }, true)]
+    [InlineData("https://localhost:8496/", new[] { "https://localhost:8496" }, true)]
+    [InlineData("https://bücher.example/", new[] { "https://xn--bcher-kva.example" }, true)]
+    [InlineData("https://localhost/", new[] { "https://localhost", "" }, false)]
+    [InlineData("https://localhost/", new[] { "https://localhost", "https://localhost" }, false)]
+    [InlineData("https://localhost/", new[] { "" }, false)]
+    [InlineData("https://localhost/", new[] { "null" }, false)]
+    [InlineData("https://localhost/", new[] { "https://localhost/" }, false)]
+    [InlineData("https://localhost/", new[] { "https://localhost/mcp" }, false)]
+    [InlineData("https://localhost/", new[] { "https://localhost?x=1" }, false)]
+    [InlineData("https://localhost/", new[] { "https://localhost#x" }, false)]
+    [InlineData("https://localhost/", new[] { "https://user@localhost" }, false)]
+    [InlineData("https://localhost/", new[] { "http://localhost" }, false)]
+    [InlineData("https://localhost/", new[] { "https://localhost:8443" }, false)]
+    [InlineData("https://localhost/", new[] { "https://untrusted.example" }, false)]
+    public void RequiredOrigin_ComparesSchemeAsciiHostAndEffectivePort(string issuer, string[] sent, bool allowed) =>
+        Assert.Equal(allowed, new CluckworkMcp.RequiredOrigin(new Uri(issuer)).Allows(new StringValues(sent)));
+
+    private Task<HttpResponseMessage> SendAsync(HttpMethod method, string protocolVersion, string? origin, string path = CluckworkMcp.Path)
+    {
+        var request = new HttpRequestMessage(method, path);
+        if (method == HttpMethod.Post)
+            request.Content = new StringContent("""{"jsonrpc":"2.0","id":1,"method":"tools/list"}""", System.Text.Encoding.UTF8, "application/json");
+        request.Headers.Accept.ParseAdd("application/json");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        request.Headers.Add("MCP-Protocol-Version", protocolVersion);
+        if (origin is not null)
+            request.Headers.Add("Origin", origin);
+        return OAuthServerTests.HttpsClient(factory, bearer: null).SendAsync(request);
     }
 
     // The tool walks in McpToolSurfaceTests must reach every tool the SDK serves. The

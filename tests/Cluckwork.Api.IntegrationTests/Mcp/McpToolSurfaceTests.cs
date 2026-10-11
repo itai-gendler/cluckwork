@@ -49,8 +49,8 @@ public sealed class McpToolSurfaceTests
             .Select(m => $"{m.DeclaringType!.FullName}.{m.Name} returns {m.ReturnType.Name}; return Task<McpPage<T>>")]);
     }
 
-    // #792: phase 1 tools return no farm-entered free text. Every text field a read tool
-    // returns is listed here with why it is not one, so a new note or reason field fails.
+    // #792: phase 1 tools return no farm-entered free text. Every text field a read or write
+    // tool returns is listed here with why it is not one, so a new note or reason field fails.
     private static readonly string[] ReplyText =
     [
         "CustomerBalanceRow.Customer", // a customer's name: an identifier, at most 120 characters (#792, 2026-10-11)
@@ -66,6 +66,7 @@ public sealed class McpToolSurfaceTests
         "McpMoney.Amount", // a decimal rendered from minor units
         "McpMoney.Currency", // an ISO currency code
         "PaymentRow.Method", // enum
+        "RecordedDailyEntry.FlockName",
         "SalesOrderLine.Grade",
         "SalesOrderLine.Unit", // enum
         "SalesOrderRow.Customer",
@@ -76,8 +77,9 @@ public sealed class McpToolSurfaceTests
     ];
 
     [Fact]
-    public void RealTree_ReadToolRepliesReturnOnlyReviewedText() =>
-        Assert.Equal(ReplyText.Order(), ReadTools().SelectMany(m => TextFields(m.ReturnType, m.Name, [])).Distinct().Order());
+    public void RealTree_ToolRepliesReturnOnlyReviewedText() =>
+        Assert.Equal(ReplyText.Order(), McpToolSurface.ToolTypes(ApiTypes).SelectMany(McpToolSurface.ToolMethods)
+            .SelectMany(m => TextFields(m.ReturnType, m.Name, [])).Distinct().Order());
 
     // The walk reaches text a serializer would emit from any namespace, inside a collection
     // or array, and refuses a reply shape it cannot see into.
@@ -273,6 +275,7 @@ public sealed class McpToolSurfaceTests
     [InlineData(typeof(RoleOnlyTool), "has no scope policy")]
     [InlineData(typeof(ScopeOnlyTool), "has no role policy")]
     [InlineData(typeof(AnonymousTool), "allows anonymous callers")]
+    [InlineData(typeof(OpenWorldReadTool), "leaves OpenWorld at its default true")]
     public void ToolMissingAGate_IsAGateFinding(Type tool, string finding) =>
         Assert.Contains(McpToolSurface.GateFindings([tool]), f => f.Contains(finding));
 
@@ -351,7 +354,7 @@ public sealed class McpToolSurfaceTests
     [McpServerToolType]
     private sealed class GatedTool(McpCallContext call)
     {
-        [ModelContextProtocol.Server.McpServerTool(ReadOnly = true), Authorize, Authorize(Policy = AuthPolicies.FarmReadScope)]
+        [ModelContextProtocol.Server.McpServerTool(ReadOnly = true, OpenWorld = false), Authorize, Authorize(Policy = AuthPolicies.FarmReadScope)]
         public string Read() => call.Email;
     }
 
@@ -392,7 +395,7 @@ public sealed class McpToolSurfaceTests
     [McpServerToolType, Authorize, Authorize(Policy = AuthPolicies.FarmReadScope)]
     private sealed class InheritingTool(McpCallContext call) : UngatedBase
     {
-        [ModelContextProtocol.Server.McpServerTool(ReadOnly = true)]
+        [ModelContextProtocol.Server.McpServerTool(ReadOnly = true, OpenWorld = false)]
         public string Read() => call.Email;
     }
 
@@ -409,6 +412,14 @@ public sealed class McpToolSurfaceTests
     {
         [ModelContextProtocol.Server.McpServerTool, Authorize, Authorize(Policy = AuthPolicies.FarmReadScope)]
         public string Write() => call.Email;
+    }
+
+    // The SDK emits openWorldHint only when set, and the MCP default is true.
+    [McpServerToolType]
+    private sealed class OpenWorldReadTool(McpCallContext call)
+    {
+        [ModelContextProtocol.Server.McpServerTool(ReadOnly = true), Authorize, Authorize(Policy = AuthPolicies.FarmReadScope)]
+        public string Read() => call.Email;
     }
 
     [McpServerToolType]

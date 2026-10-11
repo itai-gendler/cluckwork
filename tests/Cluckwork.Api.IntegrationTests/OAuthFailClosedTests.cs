@@ -4,7 +4,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Cluckwork.Api.IntegrationTests.Infrastructure;
+using Cluckwork.Api.IntegrationTests.SharedState;
 using Cluckwork.Api.Modules.Access.OAuth;
+using Cluckwork.Api.RateLimiting;
 using Cluckwork.Application.Common;
 using Cluckwork.Domain.Modules.Farm.Accounts;
 using Cluckwork.Domain.Modules.Farm.Contracts;
@@ -22,6 +24,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using OpenIddict.Abstractions;
 using OpenIddict.Server;
+using OpenIddict.Validation;
 using static OpenIddict.Abstractions.OpenIddictConstants;
 
 namespace Cluckwork.Api.IntegrationTests;
@@ -275,6 +278,245 @@ public sealed partial class OAuthFailClosedTests(CluckworkWebApplicationFactory 
         Assert.Equal(HttpStatusCode.OK, other.StatusCode);
     }
 
+    // The per-token key is unverified text, so a forged bearer per request would never run
+    // out. Each refusal spends the address's failure budget, which is checked before the
+    // next token is looked up.
+    [Fact]
+    public async Task ForgedBearers_FromOneAddress_RunOutOfTheFailureBudget()
+    {
+        using var host = FrozenHost(new FakeTimeProvider());
+        const int budget = RateLimitingOptions.OAuthApiFailuresPerAddress;
+
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i <= budget; i++)
+        {
+            using var response = await Client(host, $"forged-{Guid.NewGuid():N}").GetAsync(Probe.Read);
+            statuses.Add(response.StatusCode);
+        }
+
+        Assert.Equal(Enumerable.Repeat(HttpStatusCode.Unauthorized, budget).Append(HttpStatusCode.TooManyRequests), statuses);
+    }
+
+    // A valid token's calls spend nothing, so it keeps working while only valid traffic flows.
+    // The forged control proves the read names the key a refusal spends.
+    [Fact]
+    public async Task ValidTokenCalls_SpendNoFailureBudget()
+    {
+        using var host = FrozenHost(new FakeTimeProvider());
+        var token = await IssueAsync(host, await SeedAsync(Roles.Manager), ReadScope);
+
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i < 5; i++)
+        {
+            using var response = await Client(host, token).GetAsync(Probe.Read);
+            statuses.Add(response.StatusCode);
+        }
+        var afterValid = await FailuresAsync(host);
+        using var forged = await Client(host, "forged").GetAsync(Probe.Read);
+
+        Assert.All(statuses, s => Assert.Equal(HttpStatusCode.OK, s));
+        Assert.Equal(0, afterValid);
+        Assert.Equal(HttpStatusCode.Unauthorized, forged.StatusCode);
+        Assert.Equal(1, await FailuresAsync(host));
+    }
+
+    // Refusals reach the failure budget only when they finish, so the cap on bearers in flight
+    // bounds what one address can start meanwhile. Authentication is held open here; the next
+    // bearer from that address is refused, another address is not, and every held request
+    // gives its place back when it finishes.
+    [Fact]
+    public async Task BearersInFlight_FromOneAddress_AreCapped_AndAnotherAddressIsNot()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var entered = 0;
+        using var host = FrozenHost(new FakeTimeProvider()).WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.AddSingleton<IStartupFilter, FakeRemoteIpStartupFilter>();
+            services.AddOpenIddict().AddValidation(validation =>
+                validation.AddEventHandler<OpenIddictValidationEvents.ProcessAuthenticationContext>(handler => handler
+                    .UseInlineHandler(async _ =>
+                    {
+                        Interlocked.Increment(ref entered);
+                        await gate.Task;
+                    })
+                    .SetOrder(int.MinValue + 100_000)));
+        }));
+        const int cap = RateLimitingOptions.OAuthApiBearersInFlightPerAddress;
+
+        HttpResponseMessage refused;
+        Task<HttpResponseMessage> other;
+        var held = Enumerable.Range(0, cap).Select(i => Client(host, $"forged-{i}").GetAsync(Probe.Read)).ToList();
+        try
+        {
+            await UntilAsync(() => Volatile.Read(ref entered) == cap);
+            // Without the cap this request would wait on the gate too.
+            refused = await Client(host, "forged-over").GetAsync(Probe.Read).WaitAsync(TimeSpan.FromSeconds(30));
+            var otherClient = Client(host, "forged-elsewhere");
+            otherClient.DefaultRequestHeaders.Add("X-Test-Remote", "203.0.113.9");
+            other = otherClient.GetAsync(Probe.Read);
+            await UntilAsync(() => Volatile.Read(ref entered) == cap + 1);
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+        var finished = await Task.WhenAll(held.Append(other));
+        using var afterwards = await Client(host, "forged-after").GetAsync(Probe.Read);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, refused.StatusCode);
+        Assert.All(finished, r => Assert.Equal(HttpStatusCode.Unauthorized, r.StatusCode));
+        Assert.Equal(HttpStatusCode.Unauthorized, afterwards.StatusCode);
+    }
+
+    // The permit covers authentication only. Once the credential gates pass, the request gives
+    // it back, so tool work held open on every slot does not refuse the next authentication.
+    [Fact]
+    public async Task AuthenticatedWorkInFlight_DoesNotHoldAuthenticationPermits()
+    {
+        var work = new HeldWork();
+        using var host = FrozenHost(new FakeTimeProvider()).WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.AddSingleton(work);
+            services.AddSingleton<IStartupFilter, HeldProbe>();
+        }));
+        var token = await IssueAsync(host, await SeedAsync(Roles.Manager), ReadScope);
+        const int cap = RateLimitingOptions.OAuthApiBearersInFlightPerAddress;
+
+        HttpResponseMessage fresh;
+        var held = Enumerable.Range(0, cap).Select(_ => Client(host, token).GetAsync(HeldProbe.Path)).ToList();
+        try
+        {
+            await UntilAsync(() => Volatile.Read(ref work.Entered) == cap);
+            fresh = await Client(host, token).GetAsync(Probe.Read).WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            work.Gate.TrySetResult();
+        }
+        var finished = await Task.WhenAll(held);
+
+        Assert.Equal(HttpStatusCode.OK, fresh.StatusCode);
+        Assert.All(finished, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
+    }
+
+    private sealed class HeldWork
+    {
+        public TaskCompletionSource Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int Entered;
+    }
+
+    // An authenticated endpoint whose work waits on the gate, standing in for a slow tool call.
+    private sealed class HeldProbe(HeldWork work) : IStartupFilter
+    {
+        public const string Path = "/test/oauth/held";
+
+        public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next) => app =>
+        {
+            next(app);
+            var endpoints = (IEndpointRouteBuilder)app.Properties["__EndpointRouteBuilder"]!;
+            endpoints.MapGet(Path, async () =>
+                {
+                    Interlocked.Increment(ref work.Entered);
+                    await work.Gate.Task;
+                    return Results.Ok();
+                })
+                .AcceptOAuthTokens(ReadScope);
+        };
+    }
+
+    private static async Task UntilAsync(Func<bool> condition)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        while (!condition())
+            await Task.Delay(10, timeout.Token);
+    }
+
+    // The budget is a window, so a spent address may try again once it rolls over.
+    [Fact]
+    public async Task SpentFailureBudget_RecoversWhenTheWindowRollsOver()
+    {
+        var clock = new FakeTimeProvider();
+        using var host = FrozenHost(clock);
+        var counter = host.Services.GetRequiredService<IFixedWindowCounter>();
+        for (var i = 0; i < RateLimitingOptions.OAuthApiFailuresPerAddress; i++)
+            await counter.IncrementAsync(FailureKey, RateLimitingOptions.OAuthApiFailuresWindow);
+
+        using var spent = await Client(host, "forged").GetAsync(Probe.Read);
+        clock.Advance(RateLimitingOptions.OAuthApiFailuresWindow);
+        using var rolledOver = await Client(host, "forged").GetAsync(Probe.Read);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, spent.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, rolledOver.StatusCode);
+    }
+
+    // A busy connection hitting its own per-token limit is not a refused credential.
+    [Fact]
+    public async Task PerTokenRefusals_SpendNoFailureBudget()
+    {
+        using var host = FrozenHost(new FakeTimeProvider(), ("OAuthApi", 2));
+        var token = await IssueAsync(host, await SeedAsync(Roles.Manager), ReadScope);
+
+        var statuses = new List<HttpStatusCode>();
+        for (var i = 0; i < 4; i++)
+        {
+            using var response = await Client(host, token).GetAsync(Probe.Read);
+            statuses.Add(response.StatusCode);
+        }
+
+        Assert.Equal([HttpStatusCode.OK, HttpStatusCode.OK, HttpStatusCode.TooManyRequests, HttpStatusCode.TooManyRequests], statuses);
+        Assert.Equal(0, await FailuresAsync(host));
+    }
+
+    // The failure budget is read from the shared store, not this process: a store reporting
+    // it spent refuses a valid token that every other check would admit.
+    [Fact]
+    public async Task SpentFailureBudget_InTheSharedStore_RefusesBeforeAuthentication()
+    {
+        using var issuing = Host();
+        var token = await IssueAsync(issuing, await SeedAsync(Roles.Manager), ReadScope);
+        using var host = Host().WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll<IFixedWindowCounter>();
+            services.AddSingleton<IFixedWindowCounter, SpentFailureBudgetCounter>();
+        }));
+
+        using var response = await Client(host, token).GetAsync(Probe.Read);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.Equal(TimeSpan.FromSeconds(42), response.Headers.RetryAfter?.Delta);
+    }
+
+    private const string FailureKey = $"{RateLimitingOptions.OAuthApiFailuresKeyPrefix}:local";
+
+    private static async Task<long> FailuresAsync(WebApplicationFactory<Program> host) =>
+        (await host.Services.GetRequiredService<IFixedWindowCounter>().CountAsync(
+            FailureKey, RateLimitingOptions.OAuthApiFailuresWindow)).Count;
+
+    // The failure budget's window is a fixed minute, so a test that spends or reads it runs on
+    // a counter whose clock stands still unless the test moves it.
+    private WebApplicationFactory<Program> FrozenHost(FakeTimeProvider clock, params (string Policy, int PermitLimit)[] limits) =>
+        Host(limits).WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll<IFixedWindowCounter>();
+            services.AddSingleton<IFixedWindowCounter>(new InProcessFixedWindowCounter(clock));
+        }));
+
+    // Admits every increment; reports every failure budget spent.
+    private sealed class SpentFailureBudgetCounter : IFixedWindowCounter
+    {
+        public long Increment(string key, TimeSpan window) => 1;
+
+        public ValueTask<FixedWindowResult> IncrementAsync(
+            string key, TimeSpan window, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new FixedWindowResult(1, window));
+
+        public ValueTask<FixedWindowResult> CountAsync(
+            string key, TimeSpan window, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new FixedWindowResult(
+                key.StartsWith(RateLimitingOptions.OAuthApiFailuresKeyPrefix + ":", StringComparison.Ordinal) ? long.MaxValue : 0,
+                TimeSpan.FromSeconds(42)));
+    }
+
     [Fact]
     public async Task TokenEndpoint_IsRateLimited()
     {
@@ -385,6 +627,8 @@ public sealed partial class OAuthFailClosedTests(CluckworkWebApplicationFactory 
         Assert.Contains(bearerKey, counter.Keys);
     }
 
+    // Refuses every increment. Reads nothing spent, so oauth-api's failure budget, checked
+    // first, lets the per-token limit decide.
     private sealed class RefusingCounter : IFixedWindowCounter
     {
         public ConcurrentBag<string> Keys { get; } = [];
@@ -401,6 +645,10 @@ public sealed partial class OAuthFailClosedTests(CluckworkWebApplicationFactory 
             Keys.Add(key);
             return ValueTask.FromResult(new FixedWindowResult(long.MaxValue, window));
         }
+
+        public ValueTask<FixedWindowResult> CountAsync(
+            string key, TimeSpan window, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(new FixedWindowResult(0, window));
     }
 
     private sealed record SeededUser(Guid Id, Guid AccountId, string Jwt, string OwnerEmail);

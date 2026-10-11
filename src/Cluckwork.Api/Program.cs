@@ -299,7 +299,11 @@ app.UseSerilogRequestLogging(options =>
 app.UseCluckworkBindingFailureResponse();
 
 // Endpoint rate-limit policies (#143) — no global limiter, only routes that
-// opt in via RequireRateLimiting are affected.
+// opt in via RequireRateLimiting are affected. oauth-api endpoints also limit
+// refused bearers and bearers in flight per address, checked first.
+if (identity.OAuthIssuer is { } mcpIssuer)
+    app.UseMcpOriginCheck(mcpIssuer);
+app.UseOAuthApiAddressLimits();
 app.UseRateLimiter();
 
 // #309 — enforce the per-endpoint request-body byte caps (the auth/credential
@@ -339,6 +343,9 @@ app.UseMiddleware<TenantResolutionMiddleware>();
 // CredentialEpochMiddlewareOrderTests.
 app.UseMiddleware<FlockScopeResolutionMiddleware>();
 app.UseMiddleware<CredentialEpochMiddleware>();
+// The credential gates have decided, so an oauth-api request gives back its
+// authentication permit before its body and tool work (UseOAuthApiAddressLimits).
+app.UseOAuthApiInFlightRelease();
 // #283 — the first-run "you must set a new password" gate. BEFORE
 // UseAuthorization (deliberately) so it applies uniformly regardless of which
 // AuthPolicies tier an endpoint carries, and before idempotency so a blocked
@@ -472,7 +479,7 @@ app.MapGroup("/api/v1/export")
 
 // #795 — OpenIddict answers the token endpoint itself; only authorization reaches an endpoint.
 // #806 — /mcp accepts only OAuth tokens, so it exists only beside the server that issues them.
-if (identity.OAuthServer)
+if (identity.OAuthIssuer is not null)
 {
     app.MapGroup("/api/v1/oauth")
         .WithTags("OAuth")

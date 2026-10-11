@@ -37,6 +37,22 @@ public sealed class RateLimitingOptions
     // #806 — /mcp is the only endpoint on it, and each MCP message is one POST: a session
     // spends some before its first tool call (decision 806-mcp-endpoint.md).
     public FixedWindow OAuthApi { get; init; } = new() { PermitLimit = 300, WindowSeconds = 60 };
+    // The per-token key is unverified text, so a caller rotating forged bearers would get a
+    // fresh budget per request. The same endpoints therefore also count REFUSED bearers per
+    // client address, and refuse an address over budget before authenticating it. Valid
+    // calls spend nothing, so many farms behind one assistant's egress address do not share
+    // a call budget. 300 a minute caps forged-token lookups at five a second per address and
+    // leaves room for many revoked connections behind that address to retry before their
+    // people reconnect them.
+    public const string OAuthApiFailuresKeyPrefix = "oauth-api-failures";
+    public const int OAuthApiFailuresPerAddress = 300;
+    public static readonly TimeSpan OAuthApiFailuresWindow = TimeSpan.FromMinutes(1);
+    // Refusals reach that budget only when they finish, so concurrent lookups would all be
+    // admitted. Bearer authentications in flight per address are capped too, per process. A
+    // request holds its permit only until the credential gates decide, so 32 bounds lookups
+    // running at once, not the tool calls behind one egress address.
+    public const string OAuthApiInFlightPolicyName = "oauth-api-in-flight";
+    public const int OAuthApiBearersInFlightPerAddress = 32;
     public FixedWindow OAuthRegister { get; init; } = new() { PermitLimit = 10, WindowSeconds = 3600 };
     // Small on purpose: a report query is a bounded-range aggregate (#311), not
     // a hot path — a genuine user rarely has more than one or two in flight at

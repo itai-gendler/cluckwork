@@ -92,17 +92,9 @@ internal static class CluckworkRateLimitingServiceCollectionExtensions
                         context.HttpContext.Request.Path.Value);
                 }
 
-                // #806 — oauth-api counts per token and serves /mcp, whose client reads a
-                // JSON-RPC error. The body is unread here, so the request id is unknown.
                 if (policyName == RateLimitingOptions.OAuthApiPolicyName)
                 {
-                    context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                    await context.HttpContext.Response.WriteAsJsonAsync(new
-                    {
-                        jsonrpc = "2.0",
-                        id = (string?)null,
-                        error = new { code = -32000, message = "Too many requests with this connection. Try again later." },
-                    });
+                    await WriteJsonRpcTooManyRequestsAsync(context.HttpContext.Response);
                     return;
                 }
 
@@ -168,6 +160,107 @@ internal static class CluckworkRateLimitingServiceCollectionExtensions
         return new CluckworkRateLimitingRegistration(
             rateLimiting,
             trustedProxies);
+    }
+
+    // #806 — oauth-api serves /mcp, whose client reads a JSON-RPC error. The body is unread
+    // here, so the request id is unknown.
+    internal static Task WriteJsonRpcTooManyRequestsAsync(HttpResponse response)
+    {
+        response.StatusCode = StatusCodes.Status429TooManyRequests;
+        return response.WriteAsJsonAsync(new
+        {
+            jsonrpc = "2.0",
+            id = (string?)null,
+            error = new { code = -32000, message = "Too many requests. Try again later." },
+        });
+    }
+}
+
+internal static class OAuthApiAddressLimits
+{
+    // Before UseRateLimiter, so a refused address spends no per-token permit and
+    // authenticates nothing. Two limits, both per client address:
+    // - the failure budget, shared across replicas: only a presented bearer refused with 401
+    //   spends it, so a valid call, a scope 403, a per-token 429 and a client's tokenless
+    //   discovery probe spend nothing;
+    // - bearer authentications in flight, which bounds the lookups admitted before their
+    //   refusals reach the failure budget. UseOAuthApiInFlightRelease gives the permit back once
+    //   the credential gates have decided, so a valid call's body and tool work hold none.
+    public static void UseOAuthApiAddressLimits(this IApplicationBuilder app)
+    {
+        var budget = new FailedAuthenticationBudget(
+            RateLimitingOptions.OAuthApiFailuresKeyPrefix,
+            RateLimitingOptions.OAuthApiFailuresPerAddress,
+            RateLimitingOptions.OAuthApiFailuresWindow);
+        // Per process on purpose: requests in flight are this instance's own work, so each
+        // replica bounds its own. It is not one of #271's combined budgets.
+        var inFlight = PartitionedRateLimiter.Create<string, string>(address =>
+            RateLimitPartition.GetConcurrencyLimiter(address, _ => new ConcurrencyLimiterOptions
+            {
+                PermitLimit = RateLimitingOptions.OAuthApiBearersInFlightPerAddress,
+                QueueLimit = 0,
+            }));
+        app.ApplicationServices.GetRequiredService<IHostApplicationLifetime>().ApplicationStopped.Register(inFlight.Dispose);
+
+        app.Use(async (context, next) =>
+        {
+            if (context.GetEndpoint()?.Metadata.GetMetadata<EnableRateLimitingAttribute>()?.PolicyName
+                != RateLimitingOptions.OAuthApiPolicyName)
+            {
+                await next(context);
+                return;
+            }
+
+            if (await budget.RefusalAsync(context) is { } retryAfter)
+            {
+                await RefuseAsync(context, RateLimitingOptions.OAuthApiFailuresKeyPrefix, retryAfter);
+                return;
+            }
+
+            if (!RateLimitKey.HasBearer(context.Request))
+            {
+                await next(context);
+                return;
+            }
+
+            // Disposed here on every path the release below does not reach: a refusal, an
+            // exception, a cancellation. A lease's Dispose releases its permit once.
+            using var lease = inFlight.AttemptAcquire(RateLimitKey.ForClient(context.Connection.RemoteIpAddress));
+            if (!lease.IsAcquired)
+            {
+                await RefuseAsync(context, RateLimitingOptions.OAuthApiInFlightPolicyName, TimeSpan.FromSeconds(1));
+                return;
+            }
+
+            context.Features.Set(new InFlightAuthentication(lease));
+            await next(context);
+            if (context.Response.StatusCode == StatusCodes.Status401Unauthorized)
+                await budget.RecordAsync(context);
+        });
+    }
+
+    // After the credential gates, before authorization, body reading and tool work.
+    public static void UseOAuthApiInFlightRelease(this IApplicationBuilder app) =>
+        app.Use((context, next) =>
+        {
+            context.Features.Get<InFlightAuthentication>()?.Lease.Dispose();
+            return next(context);
+        });
+
+    private sealed record InFlightAuthentication(RateLimitLease Lease);
+
+    private static Task RefuseAsync(HttpContext context, string policy, TimeSpan retryAfter)
+    {
+        context.RequestServices.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("Cluckwork.Api.Security.RateLimiting")
+            .LogWarning("{SecurityEvent} policy={Policy} client={ClientIp} path={Path}",
+                SecurityEvents.RateLimitRejected,
+                policy,
+                RateLimitKey.ForClient(context.Connection.RemoteIpAddress),
+                context.Request.Path.Value);
+        context.Response.Headers.RetryAfter =
+            ((int)Math.Ceiling(retryAfter.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
+        return CluckworkRateLimitingServiceCollectionExtensions.WriteJsonRpcTooManyRequestsAsync(context.Response);
     }
 }
 

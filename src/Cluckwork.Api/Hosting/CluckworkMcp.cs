@@ -5,6 +5,7 @@ using Cluckwork.Application.Modules.Access.Contracts;
 using Cluckwork.Infrastructure.Modules.Access.OAuth;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Primitives;
 using ModelContextProtocol.AspNetCore;
 using ModelContextProtocol.AspNetCore.Authentication;
 using ModelContextProtocol.Authentication;
@@ -81,5 +82,48 @@ internal static class CluckworkMcp
                 return Results.StatusCode(StatusCodes.Status405MethodNotAllowed);
             })
             .ExcludeFromDescription();
+    }
+
+    // MCP transports require Origin validation against DNS rebinding, for every request to
+    // the endpoint. It runs before authentication and rate limiting, so a foreign page gets
+    // 403 whatever it sends. A native client sends no Origin; a browser sends its page's.
+    // Keyed on the path, not the endpoint, because a method /mcp does not map (DELETE, PUT,
+    // OPTIONS) selects routing's own 405 endpoint. Matched as routing matches the route:
+    // ignoring case, with one optional trailing slash.
+    public static void UseMcpOriginCheck(this IApplicationBuilder app, Uri issuer)
+    {
+        var required = new RequiredOrigin(issuer);
+        app.Use((context, next) =>
+        {
+            var path = context.Request.Path.Value;
+            if (!(string.Equals(path, Path, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(path, Path + "/", StringComparison.OrdinalIgnoreCase))
+                || required.Allows(context.Request.Headers.Origin))
+                return next(context);
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return Task.CompletedTask;
+        });
+    }
+
+    // The configured issuer's origin, never one derived from the request's Host. An origin
+    // is a scheme, host and port (RFC 6454), and a browser sends it once, ASCII-serialized,
+    // so the host compares as punycode and an explicit default port equals an omitted one.
+    internal sealed class RequiredOrigin(Uri issuer)
+    {
+        public bool Allows(StringValues sent) =>
+            sent.Count == 0
+            || (sent.Count == 1 && Parse(sent[0]) is { } origin
+                && origin.Scheme == issuer.Scheme
+                && string.Equals(origin.IdnHost, issuer.IdnHost, StringComparison.OrdinalIgnoreCase)
+                && origin.Port == issuer.Port);
+
+        // scheme://host[:port] and nothing more: no path, query, fragment or credentials. The
+        // opaque origin "null" is not an absolute URI, so it fails here.
+        private static Uri? Parse(string? value) =>
+            Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            && value.StartsWith(uri.Scheme + Uri.SchemeDelimiter, StringComparison.OrdinalIgnoreCase)
+            && value.AsSpan(uri.Scheme.Length + Uri.SchemeDelimiter.Length).IndexOfAny("/?#@\\") < 0
+                ? uri
+                : null;
     }
 }

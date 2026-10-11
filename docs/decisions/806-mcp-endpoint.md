@@ -17,8 +17,8 @@ the rate figure. The rest is recorded here.
 
 ## The rule
 
-**`/mcp` exists only beside the authorization server.** `Program.cs` maps it inside
-`if (identity.OAuthServer)`. Without an issuer the OAuth scheme is not registered, and
+**`/mcp` exists only beside the authorization server.** `Program.cs` maps it only when
+`identity.OAuthIssuer` is set. Without an issuer the OAuth scheme is not registered, and
 `/mcp` accepts no other token. The SDK is `ModelContextProtocol.AspNetCore` 2.2.0, and one
 endpoint serves MCP 2026-07-28 and 2025-11-25 clients.
 
@@ -80,8 +80,29 @@ SDK's own client against this endpoint, a session spends 3 POSTs to its first to
 count); each later call is one POST. In process a call took 4 to 6 ms, so only a runaway loop
 reaches the limit; a model spends seconds between calls. No account-wide
 ceiling: each token costs a step-up password entry (#798), which the password limiter
-already bounds. A 429 on `oauth-api` is a JSON-RPC error with a null id, because the limiter
-runs before the body is read, and its text names the connection, not an address.
+already bounds. The per-token key is unverified text, so a caller rotating forged bearers would
+get a fresh budget per request. The same endpoints therefore count refused bearers per client
+address in the shared counter: 300 a minute, checked before authentication. A presented bearer
+answered 401 spends one; a valid call, a per-token 429 and a tokenless discovery probe spend
+nothing. Once an address has spent its budget, its valid tokens are refused too until the
+minute rolls over, because nothing can tell them apart before authentication. Refusals
+reach that budget only when they finish, so the same endpoints also cap bearer
+authentications in flight per address at 32, per process: in-flight work is each instance's
+own (#271 records the classification). A request gives its permit back once the credential
+gates have decided, so a valid call's body and tool work hold none. A 429 on
+`oauth-api` is a JSON-RPC error with a null id, because the limiter runs before the body is read.
+
+**A foreign `Origin` gets 403.** Both MCP revisions require Origin validation against DNS
+rebinding. The check matches the `/mcp` path as routing does, whatever the method, so
+DELETE, PUT and OPTIONS, which select routing's own 405, are covered too. It runs before rate
+limiting and authentication. A
+request without `Origin` (a native client) passes. Otherwise it must carry exactly one value,
+an origin and nothing more, whose scheme, ASCII host and effective port equal those of
+`OAuth:Issuer`, never of the request's Host. The SDK leaves this check
+to the app: its maintainers declined an SDK Origin filter
+([csharp-sdk#1819](https://github.com/modelcontextprotocol/csharp-sdk/pull/1819)) in favour of
+ASP.NET Core's `AllowedHosts` and CORS
+([csharp-sdk#1554](https://github.com/modelcontextprotocol/csharp-sdk/issues/1554)).
 
 **The body cap is 32 KiB** (`WithMaxRequestBodyBytes`), beside `ReadsRequestBodyAttribute`,
 which only classifies binding errors.

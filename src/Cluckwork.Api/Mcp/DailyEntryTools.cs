@@ -37,8 +37,11 @@ public sealed class DailyEntryTools(
     [Authorize(Policy = AuthPolicies.DailyEntriesWriteScope)]
     [MirrorsRoute("RecordDailyEntry")]
     public async Task<RecordedDailyEntry> RecordAsync(
-        [Description("A key you choose for this recording. Resending the same call with the same key returns the "
-            + "first result instead of recording again; reusing it with different values is refused.")]
+        [Description("A key you choose for this recording. A successful result is kept for at least 48 hours. "
+            + "Until then, resending the same call with the same key returns that result instead of recording again, "
+            + "and reusing the key with different values is refused. After 48 hours the key may be purged and a retry "
+            + "may record again. Before retrying an older call, check the current entry with "
+            + "cluckwork_list_daily_entries, or ask a person when this connection cannot read.")]
         string idempotencyKey,
         [Description("The flock's exact name, or its id when several flocks share the name.")] string flock,
         [Description("The production day, YYYY-MM-DD.")] DateOnly date,
@@ -47,7 +50,8 @@ public sealed class DailyEntryTools(
         int dirtyEggs,
         int discardedEggs,
         int mortalityCount,
-        [Description("Sellable eggs per grade, by grade name or id.")] IReadOnlyList<GradeLine>? grades = null,
+        [Description("Sellable eggs per grade, by grade name or id. Leave it out to keep the draft's existing grade "
+            + "lines; an empty list removes them.")] IReadOnlyList<GradeLine>? grades = null,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(idempotencyKey))
@@ -96,7 +100,7 @@ public sealed class DailyEntryTools(
         };
     }
 
-    [McpServerTool(Name = "cluckwork_list_daily_entries", ReadOnly = true)]
+    [McpServerTool(Name = "cluckwork_list_daily_entries", ReadOnly = true, OpenWorld = false)]
     [Authorize]
     [Authorize(Policy = AuthPolicies.FarmReadScope)]
     [MirrorsRoute("ListDailyEntries")]
