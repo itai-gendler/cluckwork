@@ -26,7 +26,6 @@ public sealed partial class FileSizeLimitTests
     {
         ["src/Cluckwork.Api/Program.cs"] = 685,
         ["web/src/components/NamedEntityPicker.tsx"] = 1531,
-        ["web/src/routes/UsersPage.tsx"] = 1361,
         ["web/src/styles.css"] = 3581,
     };
 
