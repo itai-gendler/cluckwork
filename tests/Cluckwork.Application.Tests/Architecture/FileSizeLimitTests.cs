@@ -24,7 +24,6 @@ public sealed partial class FileSizeLimitTests
 
     private static readonly Dictionary<string, int> Legacy = new(StringComparer.Ordinal)
     {
-        ["src/Cluckwork.Api/Program.cs"] = 685,
     };
 
     private static readonly Dictionary<string, int> LegacyTests = new(StringComparer.Ordinal)
