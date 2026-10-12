@@ -34,7 +34,6 @@ public sealed partial class FileSizeLimitTests
         ["web/src/routes/Dashboard.tsx"] = 1241,
         ["web/src/routes/UsersPage.tsx"] = 1361,
         ["web/src/styles.css"] = 3581,
-        ["web/src/theme/FarmThemeProvider.tsx"] = 793,
     };
 
     private static readonly Dictionary<string, int> LegacyTests = new(StringComparer.Ordinal)
