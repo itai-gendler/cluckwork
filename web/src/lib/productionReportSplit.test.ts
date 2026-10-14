@@ -18,6 +18,7 @@ const report = (days: ProductionDay[]): ProductionReport => ({
   totalRecordedHenDays: days.reduce((a, d) => a + d.recordedHenDays, 0),
   totalRatedEggs: days.reduce((a, d) => a + d.ratedEggs, 0),
   periodHenDayPct: null, // irrelevant: the split recomputes its own from `days`, never trusts this
+  totalLosses: 0, periodSellablePct: null, periodLossPct: null, // recomputed too (#1297)
   gradeTotals: [{ eggGradeId: "g1", name: "Grade A", quantity: 999 }],
 });
 
@@ -48,11 +49,35 @@ describe("splitProductionReport (#918 — folds two adjacent trend windows into 
     expect(later.totalEggs).toBe(320 + 321 + 322 + 323 + 324 + 325 + 326);
     expect(earlier.totalRecordedHenDays).toBe(700);
     expect(later.totalRecordedHenDays).toBe(700);
+    // #1297 — the losses total and the two rates are plain sums over `days[]`
+    // too, computed the identical way server-side. These days grade everything
+    // as sellable, so the whole period sells: 100% and 0%.
+    expect(earlier.totalLosses).toBe(0);
+    expect(earlier.periodSellablePct).toBe(100);
+    expect(earlier.periodLossPct).toBe(0);
     // Nothing in `days[]` carries a per-grade breakdown; recomputing it would
     // be a guess, so each half's is deliberately empty rather than borrowed
     // from the combined report.
     expect(earlier.gradeTotals).toEqual([]);
     expect(later.gradeTotals).toEqual([]);
+  });
+
+  // #1297 — a midpoint rate must round to even, the way the server's
+  // Math.Round(x, 1) does, or the split cannot reproduce a separate request.
+  // 80 eggs: 70 hand-graded, 9 saleable cracked, 1 discarded. Both rates land
+  // on an exact midpoint (98.75 / 1.25) and the lay rate does too (79 rated
+  // over 80 recorded): Math.round would answer 98.8 / 1.3 — a 100.1 total —
+  // where the server answers 98.8 / 1.2.
+  it("rounds midpoint rates to even, reproducing the server's Math.Round(x, 1)", () => {
+    const midpoint: ProductionDay = {
+      date: "2026-07-14", totalEggs: 80, cracked: 9, dirty: 0, discarded: 1, sellable: 70, fromCounts: 9,
+      deaths: 0, recordedFlocks: 1, expectedFlocks: 1, missingFlocks: 0, henDays: 80, recordedHenDays: 80,
+      ratedEggs: 79, henDayPct: 98.8,
+    };
+    const { earlier } = splitProductionReport(report([midpoint]), "2026-07-15");
+    expect(earlier.periodSellablePct).toBe(98.8);
+    expect(earlier.periodLossPct).toBe(1.2);
+    expect(earlier.periodHenDayPct).toBe(98.8);
   });
 
   it("reports null, never 0, when a half's exposure is entirely unrecorded", () => {

@@ -36,20 +36,40 @@ export function splitProductionReport(report: ProductionReport, cutoffDate: stri
   return { earlier: summarize(earlierDays), later: summarize(laterDays) };
 }
 
+// Server parity for the one-decimal rates: the backend's `Math.Round(x, 1)`
+// rounds an exact midpoint to the even tenth, while JS `Math.round` rounds it
+// up, and the split promises to reproduce a separate server request. The
+// midpoint test runs on integers — a float × 10 cannot represent one exactly —
+// so both the rate's numerator and denominator arrive as integers.
+function roundToTenth(numerator: number, denominator: number): number {
+  const scaled = numerator * 10;
+  const q = Math.floor(scaled / denominator);
+  const r = scaled - q * denominator;
+  const up = 2 * r > denominator || (2 * r === denominator && q % 2 === 1);
+  return (q + (up ? 1 : 0)) / 10;
+}
+
 function summarize(days: ProductionDay[]): ProductionReport {
   const sum = (pick: (d: ProductionDay) => number) => days.reduce((total, d) => total + pick(d), 0);
   const totalRatedEggs = sum((d) => d.ratedEggs);
   const totalRecordedHenDays = sum((d) => d.recordedHenDays);
+  const totalEggs = sum((d) => d.totalEggs);
+  const totalSellable = sum((d) => d.sellable);
+  const totalFromCounts = sum((d) => d.fromCounts);
+  const totalLosses = sum((d) => d.cracked + d.dirty + d.discarded) - totalFromCounts;
   return {
     days,
-    totalEggs: sum((d) => d.totalEggs),
-    totalSellable: sum((d) => d.sellable),
-    totalFromCounts: sum((d) => d.fromCounts),
+    totalEggs,
+    totalSellable,
+    totalFromCounts,
+    totalLosses,
     totalDeaths: sum((d) => d.deaths),
     totalHenDays: sum((d) => d.henDays),
     totalRecordedHenDays,
     totalRatedEggs,
-    periodHenDayPct: totalRecordedHenDays > 0 ? Math.round((totalRatedEggs * 100 / totalRecordedHenDays) * 10) / 10 : null,
+    periodHenDayPct: totalRecordedHenDays > 0 ? roundToTenth(totalRatedEggs * 100, totalRecordedHenDays) : null,
+    periodSellablePct: totalEggs > 0 ? roundToTenth((totalSellable + totalFromCounts) * 100, totalEggs) : null,
+    periodLossPct: totalEggs > 0 ? roundToTenth(totalLosses * 100, totalEggs) : null,
     gradeTotals: [],
   };
 }
