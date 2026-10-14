@@ -351,10 +351,37 @@ public sealed class ReportQueries(AppDbContext db) : IReportQueries
             .CountAsync(o => o.Status == SalesOrderStatus.Voided
                           && o.OrderDate >= from && o.OrderDate <= to, ct);
 
+        // Egg lines of exactly the materialized order set (orderIds) above, so
+        // a concurrent confirm/void cannot split eggs from revenue.
+        var eggLines = new List<GradeTotal>();
+        if (orderIds.Count > 0)
+        {
+            var grouped = await db.SalesOrderItems
+                .Where(i => i.ProductTypeSnapshot == ProductType.Egg
+                         && orderIds.Contains(i.SalesOrderId))
+                .GroupBy(i => i.EggGradeId)
+                .Select(g => new { EggGradeId = g.Key, Quantity = g.Sum(i => i.QuantityBase) })
+                .ToListAsync(ct);
+
+            // Names resolve the way GetProductionAsync's breakdown does: one lookup
+            // for the ids the grouping produced, "?" when a grade has since gone.
+            var eggGradeNames = await db.EggGrades
+                .Where(g => grouped.Select(e => e.EggGradeId).Contains(g.Id))
+                .ToDictionaryAsync(g => g.Id, g => g.Name, ct);
+
+            eggLines = grouped
+                .Select(e => new GradeTotal(
+                    e.EggGradeId, eggGradeNames.GetValueOrDefault(e.EggGradeId, "?"), e.Quantity))
+                .OrderByDescending(t => t.Quantity)
+                .ToList();
+        }
+
         var revenue = confirmed.Sum(o => o.Total);
         var (code, minor) = await AccountCurrencyAsync(ct);
         return new SalesSummary(
-            confirmed.Count, revenue, paid, revenue - paid, voidedCount, code, minor);
+            confirmed.Count, revenue, paid, revenue - paid, voidedCount,
+            eggLines.Sum(e => e.Quantity), eggLines,
+            code, minor);
     }
 
     public async Task<ExpenseSummary> GetExpensesAsync(
