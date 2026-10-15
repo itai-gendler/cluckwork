@@ -87,8 +87,8 @@ const SCREENS = [
     yieldsEventTiming: true,
   },
   {
-    name: "reports",
-    path: "/reports",
+    name: "reports-production",
+    path: "/reports/production",
     ready: (page: CanaryPage) =>
       page.getByRole("table").filter({
         has: page.getByRole("columnheader", { name: tEn("reports:dateHeader") }),
@@ -101,11 +101,6 @@ const SCREENS = [
     interact: async (page: CanaryPage, timeZoneId: string) => {
       const today = farmToday(timeZoneId);
       const from = page.getByLabel(tEn("reports:fromLabel"), { exact: true });
-      // ReportsPage loads production first and the three money reports after it,
-      // so the table is on the glass while they are still in flight. Waiting for
-      // the last of them is what stops the post-interaction check passing just
-      // before a 500 lands (#841). Registered BEFORE the fill that triggers it.
-      const settled = page.waitForResponse((res) => res.url().includes("/api/v1/reports/profit"));
       // CLICK the field before filling it. `fill()` alone sets the value through
       // a synthetic path that produces NO Event Timing entry, so the interaction
       // metric would stay null while the spec looked like it interacted —
@@ -113,12 +108,6 @@ const SCREENS = [
       // click is also the faithful version of this interaction.
       await from.click();
       await from.fill(daysBefore(today, 30));
-      await settled;
-      // A POSITIVE check, because the money section renders only once all three
-      // of its reads land. Asserting the ABSENCE of an error here would pass in
-      // the gap between a 500 arriving and React rendering it (#841).
-      const money = page.getByRole("region", { name: tEn("reports:moneyHeading"), exact: true });
-      await expect(money.getByText(tEn("reports:profitRowLabel"), { exact: true })).toBeVisible();
       // The production table alone does not prove production: ReportQueries
       // emits a row per calendar day in the range whether or not anything was
       // recorded, so a report of nothing but zeroes satisfies a row count. The
@@ -142,6 +131,25 @@ const SCREENS = [
     // be exercised under load — but the spec does not pretend the interaction
     // metric covers it. Found by the instrument-validation assertion below,
     // which is the point of having one.
+    yieldsEventTiming: false,
+  },
+  {
+    name: "reports-money",
+    path: "/reports/money",
+    ready: (page: CanaryPage) =>
+      page.getByRole("region", { name: tEn("reports:moneyHeading"), exact: true }),
+    rows: (ready: CanaryLocator) => ready.locator("dt"),
+    emptyMessageKeys: [],
+    interact: async (page: CanaryPage, timeZoneId: string) => {
+      const today = farmToday(timeZoneId);
+      const from = page.getByLabel(tEn("reports:fromLabel"), { exact: true });
+      const settled = page.waitForResponse((res) => res.url().includes("/api/v1/reports/profit"));
+      await from.click();
+      await from.fill(daysBefore(today, 30));
+      await settled;
+      const money = page.getByRole("region", { name: tEn("reports:moneyHeading"), exact: true });
+      await expect(money.getByText(tEn("reports:profitRowLabel"), { exact: true })).toBeVisible();
+    },
     yieldsEventTiming: false,
   },
   {
