@@ -1969,6 +1969,16 @@ export const es = {
     henDayOver100: "Más del 100 %: se registraron más huevos que aves en el registro de aves. Revise el recuento de aves de los lotes.",
     periodRowLabel: "Período",
     gradeTotalsLabel: "Totales por clasificación registrados",
+    // #1299 — machine-drafted, pending native review (#182). Reuses the page's
+    // own words: "lote" is the established nav/dailyEntry word, "Pérdidas" the
+    // losses tile's.
+    flockHeading: "Por lote",
+    flockCaption: "Lotes que registraron en el rango",
+    flockHeader: "Lote",
+    flockLossesHeader: "Pérdidas",
+    // #1299 — "Colocación" is the established word for the placement date
+    // (es.ts placedLabel/placedHeader).
+    flockPlacedLabel: "Colocación",
 
     moneyHeading: "Dinero",
     salesSummary:
@@ -2928,7 +2938,12 @@ export const es = {
       + "aves no coinciden, y hay que revisar el recuento de aves de ese lote. Los mosaicos "
       + "<strong>Vendible %</strong> y <strong>Pérdidas %</strong> dividen los huevos del período en "
       + "inventario y pérdidas, según la opción de venta de los grados Rajado y Sucio, y juntos suman "
-      + "100 %.",
+      + "100 %. La tabla <strong>Por lote</strong> da el mismo período por lote: una fila por cada lote "
+      + "que registró en el rango, con huevos, <strong>Pérdidas</strong>, <strong>Vendible</strong>, "
+      + "muertes, <strong>Registrados</strong>, <strong>Huevos contados</strong> y <strong>% días-gallina</strong> "
+      + "— y las filas suman los totales del período. La tasa de cada lote sigue las mismas reglas: solo "
+      + "días-gallina registrados, sus propios huevos como numerador. Un lote sin exposición registrada "
+      + "muestra un guion, nunca 0.",
     // #396 — machine-drafted, pending native review (#182).
     reportsCondition:
       "<strong>Con defecto</strong>: huevos rajados y sucios que pasaron a inventario en vez de "
@@ -3589,6 +3604,18 @@ export const es = {
       + "rajados y sucios que resolvieron a un grado — sobre el total de huevos recolectados, × 100. "
       + "Sigue la opción de venta de los grados Rajado y Sucio capturada al enviar: cambiar la casilla "
       + "nunca reescribe un día pasado. Junto con Vendible % suma 100; un período sin huevos muestra un guion.",
+    // #1299 round-1 review — la entrada de la columna % días-gallina; el término
+    // es la etiqueta de la columna y la definición la nombra. Machine-drafted,
+    // pending native review (#182).
+    glossaryHenDayPctTerm: "% días-gallina",
+    glossaryHenDayPctDef:
+      "Huevos recolectados ÷ días-gallina registrados × 100 (spec §19.3, con la enmienda de #780). Un "
+      + "día-gallina es un ave viva durante un día, contada desde el libro de aves, y cada movimiento "
+      + "surte efecto desde el día siguiente. El denominador cuenta solo los lotes que registraron el "
+      + "día, así que la columna % días-gallina muestra un guion — no 0 — cuando nadie registró. El "
+      + "informe de producción la muestra por día y por lote (los huevos de cada lote sobre sus propios "
+      + "días-gallina registrados), y para todo el período como huevos del período ÷ días-gallina "
+      + "registrados del período — no un promedio de los porcentajes diarios.",
 
     glossaryInventoryItemTerm: "Artículo de inventario",
     glossaryInventoryItemDef:
