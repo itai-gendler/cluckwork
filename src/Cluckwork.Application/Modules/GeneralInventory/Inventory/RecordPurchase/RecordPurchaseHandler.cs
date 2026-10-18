@@ -16,25 +16,26 @@ public sealed class RecordPurchaseHandler(
     IAccountRepository accounts,
     IUnitOfWork unitOfWork,
     IFarmClock farmClock,
+    IAuditWriter audit,
     ILogger<RecordPurchaseHandler> logger)
 {
-    public async Task<Result<Guid>> HandleAsync(
+    public async Task<Result<InventoryLotDetails>> HandleAsync(
         RecordPurchaseCommand command, Guid accountId, CancellationToken ct)
     {
-        Result<Guid>? outcome = null;
+        Result<InventoryLotDetails>? outcome = null;
 
         await unitOfWork.ExecuteInTransactionAsync(async transactionCt =>
         {
             var item = await items.GetByIdLockedAsync(accountId, command.InventoryItemId, transactionCt);
             if (item is null || item.AccountId != accountId)
             {
-                outcome = Result.Failure<Guid>(Error.NotFound(nameof(InventoryItem), command.InventoryItemId));
+                outcome = Result.Failure<InventoryLotDetails>(Error.NotFound(nameof(InventoryItem), command.InventoryItemId));
                 return false;
             }
 
             if (!item.Active)
             {
-                outcome = Result.Failure<Guid>(Error.Domain(
+                outcome = Result.Failure<InventoryLotDetails>(Error.Domain(
                     "InventoryItem.NotActive", "Stock cannot be received for an inactive item."));
                 return false;
             }
@@ -42,7 +43,7 @@ public sealed class RecordPurchaseHandler(
             // Backdated receipts are normal (paper catch-up); future ones are not.
             if (command.ReceivedDate > await farmClock.TodayAsync(ct))
             {
-                outcome = Result.Failure<Guid>(Error.Validation(
+                outcome = Result.Failure<InventoryLotDetails>(Error.Validation(
                     "InventoryLot.FutureDate", "Received date cannot be in the future."));
                 return false;
             }
@@ -57,7 +58,7 @@ public sealed class RecordPurchaseHandler(
                 var account = await accounts.GetCurrentSharedLockedAsync(transactionCt);
                 if (account is null)
                 {
-                    outcome = Result.Failure<Guid>(Error.NotFound("Account", accountId));
+                    outcome = Result.Failure<InventoryLotDetails>(Error.NotFound("Account", accountId));
                     return false;
                 }
                 unitCost = new Money(
@@ -70,7 +71,7 @@ public sealed class RecordPurchaseHandler(
             }
             else
             {
-                outcome = Result.Failure<Guid>(Error.Validation(
+                outcome = Result.Failure<InventoryLotDetails>(Error.Validation(
                     "InventoryLot.CostRequired",
                     "A unit cost is required (the item has no default cost to fall back to)."));
                 return false;
@@ -86,14 +87,19 @@ public sealed class RecordPurchaseHandler(
 
             await lots.AddAsync(lot, transactionCt);
             await movements.AddAsync(movement, transactionCt);
-            outcome = Result.Success(lot.Id);
+            await audit.WriteAsync(AuditActions.InventoryItemPurchase, nameof(InventoryItem), item.Id,
+                reason: null, new { InventoryLotId = lot.Id, command.Quantity, item.Unit }, transactionCt);
+            // The stored lot, so a caller needs no second read to report it (#1313).
+            outcome = Result.Success(new InventoryLotDetails(
+                lot.Id, lot.InventoryItemId, lot.ReceivedDate, lot.LotNumber, lot.ExpiryDate,
+                lot.QuantityReceived, lot.QuantityAvailable, lot.UnitCost, lot.Version));
             return true;
         }, ct);
 
         if (outcome!.IsSuccess)
             logger.LogInformation(
                 "Purchase recorded: lot {InventoryLotId} of {Quantity} for item {InventoryItemId} on {ReceivedDate}",
-                outcome.Value, command.Quantity, command.InventoryItemId, command.ReceivedDate);
+                outcome.Value.Id, command.Quantity, command.InventoryItemId, command.ReceivedDate);
         return outcome.LogFailure(logger, "RecordPurchase");
     }
 }
