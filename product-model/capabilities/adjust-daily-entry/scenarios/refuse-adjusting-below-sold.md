@@ -28,7 +28,7 @@ steps:
       place: farm-web::farm::history
 ---
 
-# Refuse an adjustment below what a lot already sold
+# Refuse an adjustment below what a lot has sold, allocated or written off
 
 ## Trigger
 

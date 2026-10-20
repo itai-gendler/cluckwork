@@ -3,7 +3,7 @@ kind: validation
 routes:
   web: Web
 steps:
-- text: The Manager voids a day one of whose lots has already sold eggs
+- text: The Manager voids a day one of whose lots has already sold, allocated or written off eggs
   kind: actor
   actor: manager
   entities: []
@@ -27,15 +27,15 @@ steps:
       place: farm-web::farm::history
 ---
 
-# Refuse voiding a day whose eggs were sold
+# Refuse voiding a day whose eggs have left its lots
 
 ## Trigger
 
-Eggs from the day have already left the farm on a sale.
+Some of the day's eggs have already been sold, allocated to an order or written off.
 
 ## Outcome
 
-The day stays official; the sale must be voided first.
+The day stays official until every egg is back in its lots, for example by voiding the sale first.
 
 ## Edge cases
 

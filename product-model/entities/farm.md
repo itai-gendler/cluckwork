@@ -38,7 +38,7 @@ One farm on the server: the tenant every record belongs to, with the settings th
 
 - **Name** — the farm's own name shown in the app
 - **Farm code** — the short, stable, URL-safe code people type at sign-in; lowercase letters, digits and hyphens, 3 to 32 characters, unique on the server
-- **Timezone** — the IANA timezone that decides the farm's operational day; a new farm starts in UTC
+- **Timezone** — the IANA timezone that decides the farm's operational day; set when the farm is provisioned, UTC if none is given
 - **Locale** — a region locale such as en-US, stored for number and date formatting
 - **Currency** — the currency new amounts are recorded in, with its symbol and minor unit
 - **Unit system** — Metric or Imperial
